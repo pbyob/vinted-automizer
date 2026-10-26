@@ -1,0 +1,20 @@
+# Umgebungsvariablen & Geheimnisse
+.env
+
+# Virtuelle Python-Umgebung
+.venv/
+
+# Python Bytecode & Cache
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Persistentes Playwright Browser-Profil (Cookies & Sessions)
+browser_profile/
+
+# Artikel-Ordner ignorieren, aber Ordnerstruktur (.gitkeep) behalten
+items/to_sell/*
+!items/to_sell/.gitkeep
+items/processed/*
+!items/processed/.gitkeep
+
