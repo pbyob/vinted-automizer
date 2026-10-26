@@ -29,7 +29,7 @@ REQUIRED_CLOSING_LINE: str = "Aus tierfreiem Nichtraucherhaushalt. Bei Fragen ge
 # bei 40+ MB Smartphone-PNGs, während Etiketten & Zollstöcke gestochen scharf bleiben)
 AI_MAX_IMAGE_DIMENSION: int = 1600
 AI_JPEG_QUALITY: int = 85
-MAX_API_RETRIES: int = 3
+RETRY_WAIT_SECONDS: tuple[int, ...] = (4, 9, 16)
 
 ANALYSIS_PROMPT: str = """Du bist ein erfahrener Second-Hand-Mode-Experte für Vinted.de und Kleinanzeigen.de.
 Analysiere alle übergebenen Fotos dieses Kleidungsstücks sorgfältig und erstelle ein verkaufsstarkes, ehrliches Inserat auf Deutsch.
@@ -111,6 +111,64 @@ def _prepare_image_part_for_gemini(img_path: Path) -> types.Part:
         return types.Part.from_bytes(data=buffer.getvalue(), mime_type="image/jpeg")
 
 
+def _discover_fallback_models(client: genai.Client, primary_model: str) -> list[str]:
+    """
+    Ermittelt bei Server-Überlastung (503) automatisch alternative verfügbare Gemini-Modelle
+    über die API (bevorzugt aktuelle Flash-/Flash-Lite-/Pro-Modelle).
+    """
+    excluded_keywords = (
+        "embedding",
+        "imagen",
+        "veo",
+        "tts",
+        "audio",
+        "live",
+        "aqa",
+        "gemma",
+        "learnlm",
+        "robotics",
+        "computer-use",
+        "1.5",
+        "2.0",
+        "2.5-flash",
+    )
+    candidates: list[str] = []
+    primary_clean = primary_model.removeprefix("models/")
+
+    try:
+        for model_info in client.models.list():
+            raw_name = model_info.name or ""
+            short_name = raw_name.removeprefix("models/")
+            lower_name = short_name.lower()
+
+            if not lower_name.startswith("gemini-") or short_name == primary_clean:
+                continue
+            if any(bad in lower_name for bad in excluded_keywords):
+                continue
+
+            actions = model_info.supported_actions or []
+            if actions and "generateContent" not in actions:
+                continue
+
+            candidates.append(short_name)
+    except Exception:
+        return []
+
+    def _tier(name: str) -> int:
+        if "flash-lite" in name:
+            return 0
+        if "flash" in name:
+            return 1
+        if "pro" in name:
+            return 2
+        return 3
+
+    # Neueste Versionen innerhalb jeder Modellklasse zuerst probieren (stabile Sortierung)
+    candidates.sort(reverse=True)
+    candidates.sort(key=_tier)
+    return candidates[:4]
+
+
 def _ensure_api_key() -> str:
     """Prüft, ob GEMINI_API_KEY korrekt konfiguriert ist, und wirft sonst eine klare Fehlermeldung."""
     api_key = os.getenv("GEMINI_API_KEY", "").strip()
@@ -165,37 +223,61 @@ def analyze_item_folder(folder_path: Path, force_reanalyze: bool = False) -> Clo
         _prepare_image_part_for_gemini(img_path) for img_path in image_paths
     ]
 
-    # 3. & 4. & 5. Gemini Vision API-Call mit Structured Outputs + Retry bei 503/429
+    # 3. & 4. & 5. Gemini Vision API-Call mit Structured Outputs + Retry & Auto-Fallback bei 503/429
     active_model = os.getenv("GEMINI_MODEL", MODEL_NAME)
     client = genai.Client(http_options=types.HttpOptions(timeout=120_000))
     contents: list[object] = [*image_parts, ANALYSIS_PROMPT]
+    gen_config = types.GenerateContentConfig(
+        response_mime_type="application/json",
+        response_schema=ClothingListing,
+        temperature=0.2,
+    )
 
     response = None
     last_error: Exception | None = None
+    total_attempts = len(RETRY_WAIT_SECONDS) + 1
 
-    for attempt in range(1, MAX_API_RETRIES + 1):
+    for attempt in range(1, total_attempts + 1):
         try:
             response = client.models.generate_content(
                 model=active_model,
                 contents=contents,
-                config=types.GenerateContentConfig(
-                    response_mime_type="application/json",
-                    response_schema=ClothingListing,
-                    temperature=0.2,
-                ),
+                config=gen_config,
             )
             break
         except genai_errors.APIError as err:
             last_error = err
-            if err.code in {429, 500, 503, 504} and attempt < MAX_API_RETRIES:
-                wait_seconds = 2**attempt
+            if err.code in {429, 500, 503, 504} and attempt < total_attempts:
+                wait_seconds = RETRY_WAIT_SECONDS[attempt - 1]
                 console.print(
-                    f"[yellow]Gemini-Server kurzzeitig ausgelastet (Code {err.code}) – "
-                    f"neuer Versuch {attempt + 1}/{MAX_API_RETRIES} in {wait_seconds}s...[/yellow]"
+                    f"[yellow]Google-Server für '{active_model}' sind gerade stark ausgelastet "
+                    f"(Code {err.code}) – warte {wait_seconds}s vor Versuch {attempt + 1}/{total_attempts}...[/yellow]"
                 )
                 time.sleep(wait_seconds)
+            elif err.code in {429, 503}:
+                break
             else:
                 raise
+
+    # Falls das Hauptmodell weiterhin 503/429 meldet: automatisch Ausweichmodell nutzen
+    if response is None:
+        fallback_models = _discover_fallback_models(client, active_model)
+        for fb_model in fallback_models:
+            console.print(
+                f"[cyan]Wechsle wegen Server-Überlastung automatisch auf Ausweichmodell: "
+                f"[bold]{fb_model}[/bold]...[/cyan]"
+            )
+            try:
+                response = client.models.generate_content(
+                    model=fb_model,
+                    contents=contents,
+                    config=gen_config,
+                )
+                if response and response.text:
+                    break
+            except genai_errors.APIError as fb_err:
+                last_error = fb_err
+                continue
 
     if response is None or not response.text:
         if last_error is not None:
