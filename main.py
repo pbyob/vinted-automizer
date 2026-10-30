@@ -11,7 +11,15 @@ from rich.prompt import Prompt
 from rich.table import Table
 from rich.text import Text
 
-from src.analyzer import MODEL_NAME, analyze_item_folder, get_image_files
+from src.analyzer import (
+    GEMINI_MODEL_NAME,
+    OLLAMA_MODEL_NAME,
+    AIProvider,
+    analyze_item_folder,
+    get_default_provider,
+    get_image_files,
+    get_provider_display_name,
+)
 from src.models import ClothingListing
 from src.uploader import process_upload_for_item, setup_login_session
 
@@ -58,7 +66,40 @@ def find_item_folders() -> tuple[list[Path], list[Path]]:
     return folders_with_images, folders_without_images
 
 
-def render_listing_preview(folder_path: Path, listing: ClothingListing) -> None:
+def prompt_ai_provider(current_provider: AIProvider | None = None) -> AIProvider:
+    """Fragt den Nutzer interaktiv nach dem gewünschten KI-Modell (Lokal Ollama vs. Google Cloud)."""
+    default_provider = current_provider or get_default_provider()
+    default_choice = "1" if default_provider == "ollama" else "2"
+
+    console.print("\n[bold white]Welches KI-Modell möchtest du für die Bildanalyse nutzen?[/bold white]")
+    console.print(
+        f"  [bold green][1][/bold green] Lokal: Ollama ([bold]{OLLAMA_MODEL_NAME}[/bold]) "
+        "[dim]– 100% lokal auf deinem PC, kostenlos & ohne Server-Limits[/dim]"
+    )
+    console.print(
+        f"  [bold cyan][2][/bold cyan] Cloud: Google Gemini ([bold]{GEMINI_MODEL_NAME}[/bold]) "
+        "[dim]– über Google AI Studio API-Key[/dim]"
+    )
+
+    choice = Prompt.ask(
+        "\nModell-Auswahl",
+        choices=["1", "2"],
+        default=default_choice,
+    )
+    selected: AIProvider = "ollama" if choice == "1" else "gemini"
+    badge_color = "green" if selected == "ollama" else "cyan"
+    console.print(
+        f"[{badge_color}]✓ Aktives KI-Modell:[/{badge_color}] "
+        f"[bold]{get_provider_display_name(selected)}[/bold]"
+    )
+    return selected
+
+
+def render_listing_preview(
+    folder_path: Path,
+    listing: ClothingListing,
+    provider: AIProvider,
+) -> None:
     """Zeigt das generierte Inserat übersichtlich formatiert im Terminal an."""
     image_count = len(get_image_files(folder_path))
 
@@ -67,7 +108,11 @@ def render_listing_preview(folder_path: Path, listing: ClothingListing) -> None:
     meta_table.add_column("Wert", style="white")
 
     meta_table.add_row("Ordner:", f"[bold]{folder_path.name}[/bold] ({image_count} Foto(s))")
-    meta_table.add_row("Titel:", f"[bold yellow]{listing.title}[/bold yellow] ({len(listing.title)}/60 Zeichen)")
+    meta_table.add_row("KI-Backend:", get_provider_display_name(provider))
+    meta_table.add_row(
+        "Titel:",
+        f"[bold yellow]{listing.title}[/bold yellow] ({len(listing.title)}/60 Zeichen)",
+    )
     meta_table.add_row("Empfohlener Preis:", f"[bold green]{listing.suggested_price_eur} €[/bold green]")
     meta_table.add_row("Marke:", listing.brand)
     meta_table.add_row("Kategorie-Pfad:", listing.category_hint)
@@ -109,8 +154,11 @@ def move_to_processed(folder_path: Path) -> Path:
     return destination
 
 
-def handle_process_items() -> None:
-    """Workflow [2]: KI-Analyse + interaktiver Browser-Upload für alle Artikel in `items/to_sell/`."""
+def handle_process_items(active_provider: AIProvider) -> AIProvider:
+    """
+    Workflow [2]: KI-Analyse + interaktiver Browser-Upload für alle Artikel in `items/to_sell/`.
+    Gibt den (ggf. zwischendurch gewechselten) aktiven Provider zurück.
+    """
     folders_with_images, empty_folders = find_item_folders()
 
     if empty_folders:
@@ -129,11 +177,12 @@ def handle_process_items() -> None:
                 border_style="yellow",
             )
         )
-        return
+        return active_provider
 
     total = len(folders_with_images)
     console.print(
-        f"\n[bold green]{total} Artikel-Ordner mit Bildern gefunden.[/bold green] Starte Verarbeitung...\n"
+        f"\n[bold green]{total} Artikel-Ordner mit Bildern gefunden.[/bold green] "
+        f"Starte Verarbeitung mit [bold]{get_provider_display_name(active_provider)}[/bold]...\n"
     )
 
     for index, folder_path in enumerate(folders_with_images, start=1):
@@ -141,44 +190,65 @@ def handle_process_items() -> None:
 
         force_reanalyze = False
         while True:
+            provider_label = get_provider_display_name(active_provider)
             try:
                 with console.status(
-                    f"[bold cyan]Analysiere Fotos in '{folder_path.name}' über Gemini Vision...[/bold cyan]",
+                    f"[bold cyan]Analysiere Fotos in '{folder_path.name}' über {provider_label}...[/bold cyan]",
                     spinner="dots",
                 ):
-                    listing = analyze_item_folder(folder_path, force_reanalyze=force_reanalyze)
+                    listing = analyze_item_folder(
+                        folder_path,
+                        force_reanalyze=force_reanalyze,
+                        provider=active_provider,
+                    )
             except Exception as e:
                 console.print(
                     f"[bold red]Fehler bei der Analyse von '{folder_path.name}':[/bold red] {e}"
                 )
-                retry_choice = Prompt.ask(
-                    "Nächsten Artikel fortsetzen?",
-                    choices=["j", "n"],
-                    default="n",
-                )
-                if retry_choice.lower() == "j":
+                other_provider: AIProvider = "gemini" if active_provider == "ollama" else "ollama"
+                other_label = get_provider_display_name(other_provider)
+                console.print("  [bold cyan][1][/bold cyan] Mit anderem KI-Modell versuchen "
+                              f"([bold]{other_label}[/bold])")
+                console.print("  [bold cyan][2][/bold cyan] Nächsten Artikel fortsetzen")
+                console.print("  [bold cyan][0][/bold cyan] Zurück zum Hauptmenü")
+                err_action = Prompt.ask("Auswahl", choices=["1", "2", "0"], default="1")
+                if err_action == "1":
+                    active_provider = other_provider
+                    force_reanalyze = True
+                    continue
+                if err_action == "2":
                     break
-                return
+                return active_provider
 
-            render_listing_preview(folder_path, listing)
+            render_listing_preview(folder_path, listing, active_provider)
+
+            other_provider = "gemini" if active_provider == "ollama" else "ollama"
+            other_label = get_provider_display_name(other_provider)
 
             console.print("[bold]Aktion für diesen Artikel wählen:[/bold]")
             console.print("  [bold cyan][1][/bold cyan] Auf Kleinanzeigen & Vinted einstellen")
             console.print("  [bold cyan][2][/bold cyan] Nur Kleinanzeigen")
             console.print("  [bold cyan][3][/bold cyan] Nur Vinted")
-            console.print("  [bold cyan][4][/bold cyan] KI-Analyse neu generieren")
-            console.print("  [bold cyan][5][/bold cyan] Artikel überspringen")
+            console.print(
+                f"  [bold cyan][4][/bold cyan] KI-Analyse neu generieren "
+                f"[dim](mit {get_provider_display_name(active_provider)})[/dim]"
+            )
+            console.print(
+                f"  [bold cyan][5][/bold cyan] Mit anderem KI-Modell neu analysieren "
+                f"[dim](wechseln zu {other_label})[/dim]"
+            )
+            console.print("  [bold cyan][6][/bold cyan] Artikel überspringen")
             console.print("  [bold cyan][0][/bold cyan] Zurück zum Hauptmenü")
 
             action = Prompt.ask(
                 "\nDeine Auswahl",
-                choices=["1", "2", "3", "4", "5", "0"],
+                choices=["1", "2", "3", "4", "5", "6", "0"],
                 default="1",
             )
 
             if action == "0":
                 console.print("[dim]Kehre zum Hauptmenü zurück...[/dim]\n")
-                return
+                return active_provider
 
             if action == "4":
                 force_reanalyze = True
@@ -186,6 +256,15 @@ def handle_process_items() -> None:
                 continue
 
             if action == "5":
+                active_provider = other_provider
+                force_reanalyze = True
+                console.print(
+                    f"[yellow]Wechsle auf {get_provider_display_name(active_provider)} "
+                    "und generiere Inserat neu...[/yellow]"
+                )
+                continue
+
+            if action == "6":
                 console.print(f"[dim]Artikel '{folder_path.name}' übersprungen.[/dim]\n")
                 break
 
@@ -224,8 +303,10 @@ def handle_process_items() -> None:
                 )
             break
 
+    return active_provider
 
-def handle_dry_run_analysis() -> None:
+
+def handle_dry_run_analysis(active_provider: AIProvider) -> None:
     """Workflow [3]: Nur KI-Analyse für alle Ordner in `items/to_sell/` (ohne Browser)."""
     folders_with_images, empty_folders = find_item_folders()
 
@@ -248,27 +329,34 @@ def handle_dry_run_analysis() -> None:
 
     total = len(folders_with_images)
     success_count = 0
+    provider_label = get_provider_display_name(active_provider)
 
     console.print(
-        f"\n[bold cyan]Starte KI-Trockenlauf für {total} Artikel-Ordner...[/bold cyan]\n"
+        f"\n[bold cyan]Starte KI-Trockenlauf ({provider_label}) für {total} Artikel-Ordner...[/bold cyan]\n"
     )
 
     for index, folder_path in enumerate(folders_with_images, start=1):
         console.rule(f"[bold cyan]Trockenlauf {index}/{total}: {folder_path.name}[/bold cyan]")
         try:
             with console.status(
-                f"[bold cyan]Analysiere '{folder_path.name}'...[/bold cyan]",
+                f"[bold cyan]Analysiere '{folder_path.name}' über {provider_label}...[/bold cyan]",
                 spinner="dots",
             ):
-                listing = analyze_item_folder(folder_path, force_reanalyze=False)
-            render_listing_preview(folder_path, listing)
+                listing = analyze_item_folder(
+                    folder_path,
+                    force_reanalyze=False,
+                    provider=active_provider,
+                )
+            render_listing_preview(folder_path, listing, active_provider)
             success_count += 1
         except Exception as e:
             console.print(
                 f"[bold red]Fehler bei '{folder_path.name}':[/bold red] {e}\n"
             )
-            # Falls API-Key komplett fehlt, nicht unnötig alle weiteren Ordner versuchen
-            if "GEMINI_API_KEY" in str(e):
+            if any(
+                keyword in str(e)
+                for keyword in ("GEMINI_API_KEY", "Ollama nicht erreichbar", "noch nicht verfügbar")
+            ):
                 break
 
     console.print(
@@ -286,7 +374,7 @@ def print_header() -> None:
     banner = Text()
     banner.append("KI Second-Hand Listing-Automator\n", style="bold cyan")
     banner.append(
-        f"Google Gemini Vision ({MODEL_NAME}) + Playwright für Kleinanzeigen.de & Vinted.de",
+        f"Lokal: Ollama ({OLLAMA_MODEL_NAME})  |  Cloud: Google Gemini ({GEMINI_MODEL_NAME})  |  Playwright",
         style="dim",
     )
     console.print(Panel(banner, border_style="cyan", expand=False))
@@ -298,8 +386,15 @@ def main() -> None:
     console.print()
     print_header()
 
+    # Beim Start direkt fragen, ob lokal (Ollama) oder Cloud (Gemini) genutzt werden soll
+    active_provider: AIProvider = prompt_ai_provider()
+
     while True:
-        console.print("\n[bold white]Hauptmenü:[/bold white]")
+        badge_style = "bold green" if active_provider == "ollama" else "bold cyan"
+        console.print(
+            f"\n[bold white]Hauptmenü[/bold white] "
+            f"[dim](Aktives Modell:[/dim] [{badge_style}]{get_provider_display_name(active_provider)}[/{badge_style}][dim])[/dim]"
+        )
         console.print(
             "  [bold cyan][1][/bold cyan] Login-Session einrichten "
             "[dim](Einmalig bei Kleinanzeigen & Vinted einloggen)[/dim]"
@@ -312,11 +407,15 @@ def main() -> None:
             "  [bold cyan][3][/bold cyan] Nur KI-Analyse für alle Ordner in 'items/to_sell/' ausführen "
             "[dim](Trockenlauf ohne Browser)[/dim]"
         )
-        console.print("  [bold cyan][4][/bold cyan] Beenden")
+        console.print(
+            "  [bold cyan][4][/bold cyan] KI-Modell wechseln "
+            "[dim](Lokal Ollama <-> Google Cloud)[/dim]"
+        )
+        console.print("  [bold cyan][5][/bold cyan] Beenden")
 
         choice = Prompt.ask(
             "\nBitte Option wählen",
-            choices=["1", "2", "3", "4"],
+            choices=["1", "2", "3", "4", "5"],
             default="2",
         )
 
@@ -326,10 +425,12 @@ def main() -> None:
             except Exception as e:
                 console.print(f"[bold red]Fehler beim Einrichten der Login-Session:[/bold red] {e}")
         elif choice == "2":
-            handle_process_items()
+            active_provider = handle_process_items(active_provider)
         elif choice == "3":
-            handle_dry_run_analysis()
+            handle_dry_run_analysis(active_provider)
         elif choice == "4":
+            active_provider = prompt_ai_provider(active_provider)
+        elif choice == "5":
             console.print("\n[bold cyan]Bis zum nächsten Mal – viel Erfolg beim Verkaufen![/bold cyan]\n")
             break
 
@@ -340,4 +441,3 @@ if __name__ == "__main__":
     except KeyboardInterrupt:
         console.print("\n\n[yellow]Programm durch Benutzer abgebrochen.[/yellow]")
         sys.exit(0)
-

@@ -1,19 +1,28 @@
 # KI Second-Hand Listing-Automator (Kleinanzeigen & Vinted)
 
-Halbautomatisches CLI-Tool auf Basis von **Google Gemini Vision (`gemini-3.8-flash`)** und **Playwright**, das Fotos von Kleidungsstücken aus lokalen Ordnern analysiert, verkaufsstarke deutsche Inseratsdaten (JSON) generiert und direkt in die Web-Formulare von **Kleinanzeigen.de** und **Vinted.de** einträgt.
+Halbautomatisches CLI-Tool mit **Dual-KI-Backend** (**Lokal via Ollama `qwen3-vl:8b`** oder **Google Cloud Gemini `gemini-3.8-flash`**) und **Playwright**, das Fotos von Kleidungsstücken aus lokalen Ordnern analysiert, verkaufsstarke deutsche Inseratsdaten (JSON) generiert und direkt in die Web-Formulare von **Kleinanzeigen.de** und **Vinted.de** einträgt.
 
 ---
 
-## 1. Voraussetzungen & Einrichtung
+## 1. Voraussetzungen & KI-Auswahl
 
-### API-Key eintragen
-Öffne die Datei `.env` im Hauptverzeichnis (oder kopiere `.env.example` zu `.env`) und trage deinen Google Gemini API-Key ein:
+Beim Programmstart (und jederzeit im Hauptmenü über `[4]`) kannst du frei wählen zwischen:
 
+### Option A: 100% Lokal über Ollama (`qwen3-vl:8b`)
+Kein API-Key nötig, komplett offline, kostenlos und ohne Server-Rate-Limits:
+1. [Ollama](https://ollama.com/) installieren und starten.
+2. Modell herunterladen:
+   ```powershell
+   ollama pull qwen3-vl:8b
+   ```
+
+### Option B: Google Cloud (`gemini-3.8-flash`)
+Trage deinen Google AI Studio API-Key in die Datei `.env` im Hauptverzeichnis ein (Vorlage: `.env.example`):
 ```env
 GEMINI_API_KEY=AIzaSy...
 ```
 
-*(Einen kostenlosen API-Key erhältst du im [Google AI Studio](https://aistudio.google.com/apikey)).*
+*(Optional kannst du in `.env` auch `AI_PROVIDER=ollama`, `OLLAMA_MODEL=qwen3-vl:8b` oder `OLLAMA_BASE_URL=http://localhost:11434` anpassen.)*
 
 ### Virtuelle Umgebung & Pakete (falls noch nicht eingerichtet)
 ```powershell
@@ -32,7 +41,6 @@ Lege für jedes Kleidungsstück einen eigenen Unterordner in `items/to_sell/` an
 ```text
 items/
 └── to_sell/
-    ├── 01_beispiel_artikel/
     ├── hoodie_grau/
     │   ├── 01_vorne.jpg
     │   ├── 02_hinten.jpg
@@ -47,8 +55,8 @@ items/
 **Tipps für beste KI-Ergebnisse:**
 - Fotografiere **Vorderseite** und **Rückseite** bei gutem Tageslicht.
 - Fotografiere das **Nackenetikett** (für Marke & Größe) sowie das **Waschetikett** (für die Materialzusammensetzung).
-- Optional: Lege einen **Zollstock oder ein Maßband** an (z. B. Achsel zu Achsel & Gesamtlänge) – Gemini liest die Zentimeter automatisch ab!
-- Unterstützte Bildformate: `.jpg`, `.jpeg`, `.png`, `.webp`.
+- Optional: Lege einen **Zollstock oder ein Maßband** an (z. B. Achsel zu Achsel & Gesamtlänge) – die KI liest die Zentimeter automatisch ab!
+- Große Smartphone-Fotos (auch 40+ MB PNGs) werden sowohl für die KI-Analyse als auch für den Browser-Upload automatisch komprimiert.
 
 ---
 
@@ -61,25 +69,21 @@ Starte das interaktive Hauptmenü im Terminal:
 ```
 
 ### Ablauf im Menü:
-1. **`[1] Login-Session einrichten`** *(nur beim allerersten Start nötig)*:
-   - Öffnet ein Chromium-Fenster mit persistentem Profil (`./browser_profile`) auf Kleinanzeigen.de und Vinted.de.
-   - Akzeptiere die Cookie-Banner und logge dich auf beiden Plattformen ein.
-   - Drücke anschließend `[ENTER]` im Terminal – deine Login-Session bleibt für künftige Starts gespeichert.
-2. **`[2] Artikel in 'items/to_sell/' verarbeiten`**:
-   - Analysiert die Fotos pro Ordner und speichert das Ergebnis lokal als `listing_data.json` (spart API-Calls bei erneutem Öffnen).
-   - Zeigt dir eine formatierte Vorschau und lässt dich wählen (`Kleinanzeigen & Vinted`, `Nur Kleinanzeigen`, `Nur Vinted`, `Neu generieren`, `Überspringen`).
-   - Lädt im Browser automatisch alle Fotos hoch und füllt Titel, Beschreibung und Preis aus.
-   - Im Terminal erhältst du einen kompakten **Spickzettel** für die restlichen Dropdowns (Kategorie, Marke, Größe, Zustand, Farbe).
-   - **Sicherheit:** Das Skript klickt **niemals** selbst auf „Veröffentlichen“ – du behältst jederzeit die volle Endkontrolle.
-   - Nach dem Einstellen kann der Ordner auf Wunsch direkt nach `items/processed/` verschoben werden.
-3. **`[3] Nur KI-Analyse (Trockenlauf)`**:
-   - Generiert und prüft vorab für alle Ordner in `items/to_sell/` die `listing_data.json`, ohne den Browser zu öffnen.
+- **Modell-Auswahl beim Start:** Wähle `[1]` für **Lokal: Ollama (`qwen3-vl:8b`)** oder `[2]` für **Google Cloud (`gemini-3.8-flash`)**.
+- **`[1] Login-Session einrichten`** *(nur beim allerersten Start nötig)*:
+  Öffnet ein Chromium-Fenster mit persistentem Profil (`./browser_profile`) auf Kleinanzeigen.de und Vinted.de zum einmaligen Einloggen.
+- **`[2] Artikel in 'items/to_sell/' verarbeiten`**:
+  Analysiert die Fotos, speichert `listing_data.json` als Cache, zeigt eine Vorschau (inkl. Option `[5]`, denselben Artikel direkt mit dem jeweils anderen KI-Modell gegenzuprüfen) und füllt die Browser-Formulare aus. Das Skript klickt **niemals** automatisch auf „Veröffentlichen“.
+- **`[3] Nur KI-Analyse (Trockenlauf)`**:
+  Generiert vorab für alle Ordner in `items/to_sell/` die `listing_data.json` ohne Browser.
+- **`[4] KI-Modell wechseln`**:
+  Wechselt jederzeit im laufenden Betrieb zwischen lokalem Ollama und Google Cloud.
 
 ---
 
 ## 4. Selektoren aktualisieren mit Playwright Codegen
 
-Falls Kleinanzeigen.de oder Vinted.de künftig HTML-IDs oder Feldnamen ändern sollten, ist jedes Formularfeld in `src/uploader.py` einzeln abgesichert, sodass das Programm nicht abstürzt. Neue Selektoren lassen sich mit dem integrierten **Playwright Inspector (`codegen`)** in wenigen Sekunden herausfinden:
+Falls Kleinanzeigen.de oder Vinted.de künftig HTML-IDs oder Feldnamen ändern sollten, lassen sich neue Selektoren mit dem **Playwright Inspector (`codegen`)** sofort ermitteln:
 
 ```powershell
 # Selektoren auf Kleinanzeigen.de inspizieren
@@ -88,6 +92,3 @@ Falls Kleinanzeigen.de oder Vinted.de künftig HTML-IDs oder Feldnamen ändern s
 # Selektoren auf Vinted.de inspizieren
 .\.venv\Scripts\playwright.exe codegen https://www.vinted.de/items/new
 ```
-
-Klicke im geöffneten Browserfenster einfach in das gewünschte Eingabefeld – Playwright zeigt dir im Inspector-Fenster sofort den passenden Locator (z. B. `#postad-title` oder `input[name="title"]`), den du direkt in `src/uploader.py` übernehmen kannst.
-
